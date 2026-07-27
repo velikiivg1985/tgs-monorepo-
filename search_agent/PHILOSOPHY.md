@@ -26,5 +26,5 @@ The observer cannot see what its own frame excludes. The monitor prompt explicit
 ### AGM (Alchourrón, Gärdenfors, Makinson) → `geometry.py`
 Belief revision: contraction (retract) and revision (add after retract). `retract()` is AGM contraction. Retracted invariants are logged — they are data.
 
-
+computational appendix:
 https://medium.com/@velikiivg/theory-of-geometric-self-unfolding-tgs-a-conceptual-framework-for-a-unified-structural-e24637a3c82b
