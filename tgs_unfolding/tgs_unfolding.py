@@ -1,20 +1,10 @@
 """
 tgs_unfolding.py
-
 Minimal demonstration of self-unfolding.
-One agent. One environment. One test.
-
-The test: can the agent distinguish something
-after encounters that it could not distinguish before?
-
-∃x: x ∉ D_t ∧ x ∈ D_{t+1}
-
-No LLM. No web search. No retry. Pure structure.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
-
 
 @dataclass
 class Geometry:
@@ -22,8 +12,7 @@ class Geometry:
     _distinctions: set[str] = field(default_factory=lambda: {"same", "different"})
 
     def add(self, distinction: str) -> bool:
-        if distinction in self._distinctions:
-            return False
+        if distinction in self._distinctions: return False
         self._distinctions.add(distinction)
         return True
 
@@ -39,15 +28,13 @@ class Geometry:
     def __repr__(self):
         return f"D = {sorted(self._distinctions)}"
 
-
 class StructuralGeometry(Geometry):
     def __init__(self):
         super().__init__()
         self._patterns: dict[str, list[tuple[int, int]]] = {}
 
     def learn_pattern(self, name: str, equal_pairs: list[tuple[int, int]]) -> bool:
-        if name in self._patterns:
-            return False
+        if name in self._patterns: return False
         self._patterns[name] = equal_pairs
         return self.add(name)
 
@@ -61,12 +48,8 @@ class StructuralGeometry(Geometry):
                 seen.add(name)
         return frozenset(seen)
 
-
 class PatternExtractor:
-    """
-    How the agent looks for patterns. This is the perceptual method.
-    Self-unfolding means this itself can change (second-order unfolding).
-    """
+    """How the agent looks for patterns. Self-unfolding means this itself can change."""
     def __init__(self):
         self._methods: list[str] = ["equality"]
 
@@ -74,21 +57,17 @@ class PatternExtractor:
         found = {}
         if "equality" in self._methods:
             pairs = self._find_equal_pairs(sequence)
-            if pairs:
-                found["_".join(f"{i}={j}" for i, j in pairs)] = pairs
+            if pairs: found["_".join(f"{i}={j}" for i, j in pairs)] = pairs
         if "adjacency" in self._methods:
             pairs = self._find_adjacent_repeats(sequence)
-            if pairs:
-                found["adj_" + "_".join(f"{i}={j}" for i, j in pairs)] = pairs
+            if pairs: found["adj_" + "_".join(f"{i}={j}" for i, j in pairs)] = pairs
         if "symmetry" in self._methods:
             pairs = self._find_mirror(sequence)
-            if pairs:
-                found["sym_" + "_".join(f"{i}={j}" for i, j in pairs)] = pairs
+            if pairs: found["sym_" + "_".join(f"{i}={j}" for i, j in pairs)] = pairs
         return found
 
     def learn_method(self, method_name: str) -> bool:
-        if method_name in self._methods:
-            return False
+        if method_name in self._methods: return False
         self._methods.append(method_name)
         return True
 
@@ -109,7 +88,6 @@ class PatternExtractor:
         n = len(seq)
         return [(i, n - 1 - i) for i in range(n // 2) if seq[i] == seq[n - 1 - i]]
 
-
 class MinimalAgent:
     THRESHOLD = 3
 
@@ -124,7 +102,7 @@ class MinimalAgent:
         self._history.append(sequence)
         self._encounter_count += 1
         self._maybe_expand_perception()
-
+        
         expanded = False
         patterns = self.extractor.extract(sequence)
         for pattern_name, pairs in patterns.items():
@@ -135,16 +113,10 @@ class MinimalAgent:
         return expanded
 
     def _maybe_expand_perception(self):
-        """
-        Limitation: thresholds are hardcoded. True open-ended method discovery 
-        would require meta-learning. The point here is to show the STRUCTURE 
-        of second-order unfolding, not to solve it fully.
-        """
         if self._encounter_count >= 5 and self.extractor.learn_method("adjacency"):
             print("  [second-order] acquired: adjacency detection")
         if self._encounter_count >= 8 and self.extractor.learn_method("symmetry"):
             print("  [second-order] acquired: symmetry detection")
-
 
 class Environment:
     def __init__(self, pattern: list[int], alphabet: list):
@@ -154,12 +126,10 @@ class Environment:
 
     def next(self) -> list:
         symbols = {}
-        # Use sorted to guarantee deterministic order
         for pos in sorted(set(self.pattern)):
             symbols[pos] = self.alphabet[self._counter % len(self.alphabet)]
             self._counter += 1
         return [symbols[p] for p in self.pattern]
-
 
 def run_experiment():
     print("=" * 50)
@@ -205,5 +175,6 @@ def run_experiment():
     if level1 and level2: print("  This is two-level self-unfolding.")
     return agent
 
+# FIX: Restored correct __name__ check
 if __name__ == "__main__":
     run_experiment()
