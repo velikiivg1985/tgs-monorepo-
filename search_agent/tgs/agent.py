@@ -1,8 +1,8 @@
 """TGS Agent — self-correcting through three procedures with adaptive routing."""
 from __future__ import annotations
-import re, time
+import re
+import time
 from dataclasses import dataclass
-from typing import Optional
 from openai import OpenAI
 
 from .executor import ExecutionResult, run_python
@@ -23,18 +23,34 @@ Output ONLY the Python code. No explanation, no markdown fences."""
 
 @dataclass
 class SearchStep:
-    number: int; query: str; pages: list[Page]; signal: Signal; geometry_snapshot: list[str]
+    number: int
+    query: str
+    pages: list[Page]
+    signal: Signal
+    geometry_snapshot: list[str]
 
 @dataclass
 class ExecutionStep:
-    number: int; code: str; result: ExecutionResult; signal: ExecutionSignal; geometry_snapshot: list[str]
+    number: int
+    code: str
+    result: ExecutionResult
+    signal: ExecutionSignal
+    geometry_snapshot: list[str]
 
 class TGSAgent:
-    MAX_SEARCH_STEPS, MAX_EXECUTE_STEPS, STABILITY_WINDOW = 6, 6, 2
+    MAX_SEARCH_STEPS = 6
+    MAX_EXECUTE_STEPS = 6
+    STABILITY_WINDOW = 2
 
     def __init__(self, api_key: str, model: str = "gpt-4o-mini", base_url: str = "https://api.openai.com/v1") -> None:
-        self.client, self.model, self.geometry = OpenAI(api_key=api_key, base_url=base_url), model, Geometry()
-        self._pages, self._search_steps, self._execution_steps, self._recent_retracts = [], [], [], []
+        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.model = model
+        self.geometry = Geometry()
+        
+        self._pages: list[Page] = []
+        self._search_steps: list[SearchStep] = []
+        self._execution_steps: list[ExecutionStep] = []
+        self._recent_retracts: list[str] = []
 
     def _direct_answer(self, question: str) -> str:
         self._header("DIRECT MODE", question)
@@ -61,8 +77,8 @@ class TGSAgent:
                 pages = search(query)
                 self._pages.extend(pages)
                 self._print_search(n, query, pages)
+                
                 geo_before = self.geometry.size()
-
                 signal = monitor_ask(client=self.client, model=self.model, question=question, geometry=self.geometry.current(), pages=pages)
                 self._print_signal(signal)
                 self._apply_search_signal(signal)
@@ -71,30 +87,44 @@ class TGSAgent:
                 self._search_steps.append(SearchStep(number=n, query=query, pages=pages, signal=signal, geometry_snapshot=self.geometry.current()))
 
                 if signal.done:
-                    print(f"\n  → Monitor says done at step {n}."); break
+                    print(f"\n  → Monitor says done at step {n}.")
+                    break
+                
                 if geo_before == geo_after and not signal.retract:
                     stable_count += 1
                     if stable_count >= self.STABILITY_WINDOW:
-                        print(f"\n  → Geometry stable for {self.STABILITY_WINDOW} steps. Stopping."); break
+                        print(f"\n  → Geometry stable for {self.STABILITY_WINDOW} steps. Stopping.")
+                        break
                 else:
                     stable_count = 0
+
                 if not signal.next_query: break
                 query = signal.next_query
+
             return self._synthesise(question)
         except KeyboardInterrupt:
-            print("\n  [agent] interrupted."); return ""
+            print("\n  [agent] interrupted.")
+            return ""
         except Exception as e:
-            print(f"\n  [agent] error in ask(): {e}"); return f"Error: {e}"
+            print(f"\n  [agent] error in ask(): {e}")
+            return f"Error: {e}"
 
     def solve(self, task: str) -> str:
         self._reset()
         self._header("SOLVE", task)
         mode, reason = classify_task(self.client, self.model, task)
         print(f"\n  [ROUTER] Mode: {mode.upper()} | Reason: {reason}\n")
-        
+
         if mode == "direct": return self._direct_answer(task)
-        # For solve, light mode still benefits from code generation + falsification
-        if mode == "light": return self._light_answer(task)
+        
+        # FIX: For light mode in solve, we still generate and run code, but skip deep search
+        if mode == "light":
+            print("  → Light mode: generating code without deep search research.")
+            code = self._write_code(task)
+            result = run_python(code)
+            self._print_result(result)
+            self._print_report()
+            return code
 
         try:
             query, stable_count = task, 0
@@ -102,17 +132,21 @@ class TGSAgent:
                 pages = search(query)
                 self._pages.extend(pages)
                 self._print_search(n, query, pages)
+                
                 geo_before = self.geometry.size()
                 signal = monitor_ask(client=self.client, model=self.model, question=task, geometry=self.geometry.current(), pages=pages)
                 self._print_signal(signal)
                 self._apply_search_signal(signal)
                 geo_after = self.geometry.size()
+
                 self._search_steps.append(SearchStep(number=n, query=query, pages=pages, signal=signal, geometry_snapshot=self.geometry.current()))
+
                 if signal.done: break
                 if geo_before == geo_after and not signal.retract:
                     stable_count += 1
                     if stable_count >= self.STABILITY_WINDOW: break
                 else: stable_count = 0
+                
                 if not signal.next_query: break
                 query = signal.next_query
 
@@ -121,12 +155,17 @@ class TGSAgent:
                 self._print_execute_header(n, code)
                 result = run_python(code)
                 self._print_result(result)
+                
                 signal_e = monitor_ask_execution(client=self.client, model=self.model, task=task, geometry=self.geometry.current(), code=code, result=result)
                 self._print_execution_signal(signal_e)
                 self._apply_execution_signal(signal_e)
+
                 self._execution_steps.append(ExecutionStep(number=n, code=code, result=result, signal=signal_e, geometry_snapshot=self.geometry.current()))
+
                 if signal_e.done or signal_e.next_action == "done":
-                    print(f"\n  → Done at execution step {n}."); break
+                    print(f"\n  → Done at execution step {n}.")
+                    break
+
                 if signal_e.next_action == "fix_code" and signal_e.corrected_code:
                     code = signal_e.corrected_code
                 elif signal_e.next_action == "search_more" and signal_e.next_query:
@@ -135,22 +174,30 @@ class TGSAgent:
                     extra_signal = monitor_ask(client=self.client, model=self.model, question=task, geometry=self.geometry.current(), pages=extra)
                     self._apply_search_signal(extra_signal)
                     if extra_signal.geometry_changed: code = self._write_code(task)
-                else: break
+                else:
+                    break
+
             self._print_report()
             return code
         except KeyboardInterrupt:
-            print("\n  [agent] interrupted."); return ""
+            print("\n  [agent] interrupted.")
+            return ""
         except Exception as e:
-            print(f"\n  [agent] error in solve(): {e}"); return f"Error: {e}"
+            print(f"\n  [agent] error in solve(): {e}")
+            return f"Error: {e}"
 
     def _llm(self, system: str, user: str, temperature: float = 0.4, max_tokens: int = 1000) -> str:
         for attempt in range(1, 4):
             try:
-                response = self.client.chat.completions.create(model=self.model, temperature=temperature, max_tokens=max_tokens, messages=[{"role": "system", "content": system}, {"role": "user", "content": user}])
+                response = self.client.chat.completions.create(
+                    model=self.model, temperature=temperature, max_tokens=max_tokens,
+                    messages=[{"role": "system", "content": system}, {"role": "user", "content": user}]
+                )
                 return response.choices[0].message.content.strip()
             except Exception as e:
                 if attempt < 3:
-                    print(f"  [llm] attempt {attempt} failed: {e}"); time.sleep(2.0)
+                    print(f"  [llm] attempt {attempt} failed: {e}")
+                    time.sleep(2.0)
                 else:
                     print(f"  [llm] all retries failed: {e}")
         return ""
@@ -191,7 +238,11 @@ class TGSAgent:
         return sum(1 for r in self._recent_retracts if _similar(r, invariant)) >= 2
 
     def _reset(self) -> None:
-        self.geometry, self._pages, self._search_steps, self._execution_steps, self._recent_retracts = Geometry(), [], [], [], []
+        self.geometry = Geometry()
+        self._pages = []
+        self._search_steps = []
+        self._execution_steps = []
+        self._recent_retracts = []
 
     def _header(self, mode: str, text: str) -> None:
         print(f"\n{'═'*62}\n  TGS AGENT — {mode}\n{'═'*62}\n  {text}\n  Model : {self.model}")
@@ -230,5 +281,7 @@ class TGSAgent:
         if self.geometry.grew(): print(f"\n  Self-correction occurred.")
 
 def _extract_code(raw: str) -> str:
+    # FIX: Restored correct triple backticks regex
     blocks = re.findall(r"```(?:python)?\s*\n(.*?)```", raw, re.DOTALL)
     return max(blocks, key=len).strip() if blocks else raw.strip()
+  
