@@ -1,61 +1,40 @@
 """
 tgs/memory.py
 
-Two-layer memory for TGS agents.
+Empirically-derived memory architectures for TGS agents.
 
-Discovered empirically through 9 experiments (see experiments/):
+Based on 11 experiments comparing TGS-inspired mechanisms
+against simpler alternatives. Results summarized in:
+  experiments/RESULTS.md
 
-    Single-layer agents fail in one of two ways:
-    - Accumulator: keeps everything, distinguishes nothing
-    - Recency: adapts fast, but loses history
-    - StrictTGS: clean geometry, but misses what it discarded
+Two architectures are provided:
 
-    The key finding:
-    HypothesisAgent outperforms in complex phases (high variability).
-    Recency outperforms in static phases (one dominant structure).
+    TwoLayerMemory
+        Combines fast (recency) and slow (hypothesis) layers.
+        Never catastrophically fails.
+        Small consistent advantage on drift-heavy tasks.
 
-    Neither wins overall.
+    MeetingMemory
+        Two agents with different optics exchange through a medium.
+        Solves classification tasks that require multiple perspectives.
+        Consistent small advantage over union of separate optics.
 
-    Solution: hold both layers simultaneously.
-    Use recency as fast adapter.
-    Use hypotheses as slow memory of what was and may return.
-
-    When signal arrives:
-    1. Check recency layer — is it compatible?
-    2. Check hypothesis layer — is there a stronger compatible structure?
-    3. If both compatible — recency wins (faster, more current).
-    4. If only hypothesis compatible — use it (recency doesn't help here).
-    5. If neither — return empty (honest unknown).
-
-This is the operational form of "acceptance through difference":
-not choosing between past and present,
-but holding both until the signal resolves the choice.
-
-Theoretical basis:
-    Experiments in experiments/toy_unfolding_experiment_v3.py
-    Concept drift benchmark (experiments/hypothesis_memory_test.py)
-    See PHILOSOPHY.md: "acceptance as coexistence of competing hypotheses"
-
-Falsification condition:
-    This layer is wrong if a simpler architecture (Recency alone)
-    consistently matches or beats TwoLayerMemory across diverse tasks.
-    Run experiments/hypothesis_memory_test.py to check.
+Neither is a silver bullet. Both are documented tools
+for specific classes of problems.
 """
 from __future__ import annotations
-
 from dataclasses import dataclass, field
+from typing import Callable, Optional
 
 
-# ── Atom extractor ─────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════
+# ATOM UTILITIES
+# ══════════════════════════════════════════════════════════════════════════
 
-def extract_atoms(sequence: list) -> frozenset[str]:
+def extract_equality_atoms(sequence: list) -> frozenset[str]:
     """
     Extract pairwise equality atoms from a sequence.
-    None values are treated as unknown — skipped.
-
-    Example:
-        ['A', 'B', 'A', 'B'] -> {'eq_0=2', 'eq_1=3'}
-        ['A', None, 'A', None] -> {'eq_0=2'}
+    None values are treated as unknown and skipped.
     """
     atoms = set()
     n = len(sequence)
@@ -71,19 +50,7 @@ def atoms_compatible_with_partial(
     atoms: frozenset[str],
     partial: list,
 ) -> bool:
-    """
-    Check if a set of atoms is compatible with a partial signal.
-    Compatible = no direct contradiction in visible positions.
-
-    Example:
-        atoms = {'eq_0=2', 'eq_1=3'}
-        partial = ['A', 'B', None, None]
-        → compatible (no contradiction visible)
-
-        atoms = {'eq_0=1'}
-        partial = ['A', 'B', None, None]
-        → incompatible (A ≠ B, but eq_0=1 requires them equal)
-    """
+    """Check if atoms are compatible with a partial signal."""
     for atom in atoms:
         parts = atom.replace("eq_", "").split("=")
         i, j = int(parts[0]), int(parts[1])
@@ -94,23 +61,15 @@ def atoms_compatible_with_partial(
     return True
 
 
-# ── Hypothesis ─────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════
+# HYPOTHESIS
+# ══════════════════════════════════════════════════════════════════════════
 
 @dataclass
 class Hypothesis:
     """
-    A structural hypothesis — one coherent way of seeing.
-
-    Not a collection of atoms. A living structure with:
-    - its own atoms (what it sees)
-    - its strength (how often confirmed)
-    - its age (when last active)
-    - its origin (when born)
-
-    A hypothesis is never deleted.
-    It may sleep for a long time and wake up when its
-    context returns. This is the operational meaning of
-    "acceptance as coexistence".
+    A structural hypothesis. Never deleted once formed.
+    May 'sleep' when its context is absent, wake when it returns.
     """
     atoms          : frozenset[str]
     strength       : int = 1
@@ -127,145 +86,66 @@ class Hypothesis:
         inter = self.atoms & other
         return len(inter) / len(union) if union else 0.0
 
-    def __repr__(self) -> str:
-        return (
-            f"Hypothesis(strength={self.strength}, "
-            f"last_active={self.last_active_at}, "
-            f"atoms={sorted(self.atoms)})"
-        )
 
-
-# ── Two-layer memory ───────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════
+# TWO-LAYER MEMORY
+# ══════════════════════════════════════════════════════════════════════════
 
 class TwoLayerMemory:
     """
-    The empirically derived memory architecture for TGS agents.
+    Fast recency layer + slow hypothesis layer.
 
-    Layer 1 (Fast): Recency
-        Always tracks the most recent structure.
-        Adapts in one step.
-        Good for stable, repeating environments.
+    Prediction priority:
+        1. Recency, if compatible with signal
+        2. Strongest compatible hypothesis
+        3. Empty (honest unknown)
 
-    Layer 2 (Slow): Hypotheses
-        Accumulates structural hypotheses over time.
-        Each hypothesis persists — never deleted.
-        Good for complex, changing environments.
+    Empirical properties (see experiments/RESULTS.md):
+        - Never falls below ~30% on any phase in drift tests
+        - Small consistent advantage over recency alone
+        - No catastrophic failures where simpler agents collapse
 
-    Prediction:
-        Given a partial signal, try recency first.
-        If recency is not compatible, fall back to
-        the strongest compatible hypothesis.
-        If neither, return empty (honest unknown).
-
-    This dual strategy is why HypothesisAgent outperformed
-    Recency in complex phases but underperformed in static ones:
-    it had the slow layer but lacked the fast layer.
-
-    With both layers, the agent should perform well in both regimes.
-
-    Falsification:
-        If Recency alone consistently matches TwoLayerMemory,
-        then the slow layer adds nothing and should be removed.
-        Run hypothesis_memory_test.py to verify.
+    Not universally better. Justified only when task involves
+    context drift with returning patterns.
     """
 
     SIMILARITY_THRESHOLD: float = 0.7
 
-    def __init__(self) -> None:
-        self._step       : int               = 0
-        self._recency    : frozenset[str]    = frozenset()
-        self._hypotheses : list[Hypothesis]  = []
-
-    # ── Public: predict ────────────────────────────────────────────────────────
+    def __init__(
+        self,
+        extractor: Callable[[list], frozenset[str]] = extract_equality_atoms,
+        similarity_threshold: Optional[float] = None,
+    ) -> None:
+        self._extractor = extractor
+        if similarity_threshold is not None:
+            self.SIMILARITY_THRESHOLD = similarity_threshold
+        self._step: int = 0
+        self._recency: frozenset[str] = frozenset()
+        self._hypotheses: list[Hypothesis] = []
 
     def predict(self, partial: list) -> frozenset[str]:
-        """
-        Predict the full structure given a partial signal.
-
-        Priority:
-        1. Recency — if compatible, use it (fast, current).
-        2. Strongest compatible hypothesis — if recency fails.
-        3. Empty — if nothing is compatible (honest unknown).
-        """
-        # Fast layer: recency
-        if self._recency and atoms_compatible_with_partial(
-            self._recency, partial
-        ):
+        if self._recency and atoms_compatible_with_partial(self._recency, partial):
             return self._recency
-
-        # Slow layer: best compatible hypothesis
-        compatible = [
-            h for h in self._hypotheses
-            if h.compatible_with(partial)
-        ]
+        compatible = [h for h in self._hypotheses if h.compatible_with(partial)]
         if not compatible:
             return frozenset()
-
         best = max(compatible, key=lambda h: (h.strength, h.last_active_at))
         return best.atoms
 
-    # ── Public: learn ──────────────────────────────────────────────────────────
-
     def learn(self, sequence: list) -> bool:
-        """
-        Update both layers from a full sequence.
-
-        Returns True if a new hypothesis was created
-        (i.e., geometry expanded at the hypothesis level).
-        """
+        """Update both layers. Returns True if a new hypothesis was created."""
         self._step += 1
-        atoms = extract_atoms(sequence)
-
-        # Update fast layer
+        atoms = self._extractor(sequence)
         self._recency = atoms
-
-        # Update slow layer
-        return self._update_hypotheses(atoms)
-
-    # ── Public: inspect ────────────────────────────────────────────────────────
-
-    def hypotheses(self) -> list[Hypothesis]:
-        return list(self._hypotheses)
-
-    def recency(self) -> frozenset[str]:
-        return self._recency
-
-    def step(self) -> int:
-        return self._step
-
-    def summary(self) -> str:
-        top = sorted(
-            self._hypotheses,
-            key=lambda h: -h.strength
-        )[:3]
-        parts = [f"  recency: {sorted(self._recency)}"]
-        for i, h in enumerate(top):
-            parts.append(
-                f"  hyp #{i+1}: strength={h.strength} "
-                f"atoms={sorted(h.atoms)}"
-            )
-        return "\n".join(parts)
-
-    # ── Internal ───────────────────────────────────────────────────────────────
-
-    def _update_hypotheses(self, atoms: frozenset[str]) -> bool:
-        """
-        Update hypothesis layer.
-        If atoms overlap with existing hypothesis — strengthen it.
-        If no match — create new hypothesis.
-        Returns True if new hypothesis was created.
-        """
         if not atoms:
             return False
-
-        matched_any = False
-        for hyp in self._hypotheses:
-            if hyp.overlap(atoms) >= self.SIMILARITY_THRESHOLD:
-                hyp.strength += 1
-                hyp.last_active_at = self._step
-                matched_any = True
-
-        if not matched_any:
+        matched = False
+        for h in self._hypotheses:
+            if h.overlap(atoms) >= self.SIMILARITY_THRESHOLD:
+                h.strength += 1
+                h.last_active_at = self._step
+                matched = True
+        if not matched:
             self._hypotheses.append(Hypothesis(
                 atoms=atoms,
                 strength=1,
@@ -273,5 +153,97 @@ class TwoLayerMemory:
                 born_at=self._step,
             ))
             return True
-
         return False
+
+    def recency(self) -> frozenset[str]:
+        return self._recency
+
+    def hypotheses(self) -> list[Hypothesis]:
+        return list(self._hypotheses)
+
+    def step(self) -> int:
+        return self._step
+
+    def summary(self) -> str:
+        top = sorted(self._hypotheses, key=lambda h: -h.strength)[:3]
+        lines = [f"  recency: {sorted(self._recency)}"]
+        lines.append(f"  total hypotheses: {len(self._hypotheses)}")
+        for i, h in enumerate(top):
+            lines.append(
+                f"  #{i+1} strength={h.strength} atoms={sorted(h.atoms)}"
+            )
+        return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# MEETING MEMORY
+# ══════════════════════════════════════════════════════════════════════════
+
+class MeetingMemory:
+    """
+    Two agents with different optics meet through a medium.
+
+    Each optic sees the sequence differently.
+    The medium stores joint patterns (optic_A_view, optic_B_view) -> class.
+    Marginal memories (each optic alone -> class) serve as fallback.
+
+    Prediction priority:
+        1. Joint pattern in medium
+        2. Combined vote from marginals
+
+    Empirical properties (see experiments/RESULTS.md):
+        - Never worse than best single optic
+        - Never worse than union of optics
+        - Small consistent advantage on tasks requiring both optics
+
+    Justified when a task requires perspectives that no single
+    optic captures alone.
+    """
+
+    def __init__(
+        self,
+        optic_a: Callable[[list], frozenset[str]],
+        optic_b: Callable[[list], frozenset[str]],
+    ) -> None:
+        self._optic_a = optic_a
+        self._optic_b = optic_b
+        self._medium: dict = {}  # (sig_a, sig_b) -> {class: count}
+        self._a_alone: dict = {}  # sig_a -> {class: count}
+        self._b_alone: dict = {}  # sig_b -> {class: count}
+
+    def learn(self, sequence: list, label: str) -> None:
+        sa = self._optic_a(sequence)
+        sb = self._optic_b(sequence)
+        self._increment(self._medium, (sa, sb), label)
+        self._increment(self._a_alone, sa, label)
+        self._increment(self._b_alone, sb, label)
+
+    def predict(self, sequence: list) -> str:
+        sa = self._optic_a(sequence)
+        sb = self._optic_b(sequence)
+        key = (sa, sb)
+        if key in self._medium:
+            return self._most_common(self._medium[key])
+        a_counts = self._a_alone.get(sa, {})
+        b_counts = self._b_alone.get(sb, {})
+        combined = {}
+        for cls, cnt in a_counts.items():
+            combined[cls] = combined.get(cls, 0) + cnt
+        for cls, cnt in b_counts.items():
+            combined[cls] = combined.get(cls, 0) + cnt
+        if not combined:
+            return "UNKNOWN"
+        return self._most_common(combined)
+
+    def medium_size(self) -> int:
+        return len(self._medium)
+
+    @staticmethod
+    def _increment(store: dict, key, label: str) -> None:
+        if key not in store:
+            store[key] = {}
+        store[key][label] = store[key].get(label, 0) + 1
+
+    @staticmethod
+    def _most_common(counts: dict) -> str:
+        return max(counts.items(), key=lambda x: x[1])[0]
