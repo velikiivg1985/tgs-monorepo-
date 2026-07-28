@@ -24,3 +24,8 @@ from .agent import TGSAgent
 
 __version__ = "3.4.0"
 __all__ = ["TGSAgent"]
+
+from .memory import TwoLayerMemory, extract_atoms
+
+__version__ = "3.5.0"
+__all__ = ["TGSAgent", "TwoLayerMemory", "extract_atoms"]
