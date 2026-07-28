@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tgs-agent"
-version = "3.2.0"
+version = "3.5.0"
 description = "TGS Search Agent — a self-correcting web agent with adaptive routing"
 readme = "README.md"
 requires-python = ">=3.10"
